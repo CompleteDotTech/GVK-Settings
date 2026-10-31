@@ -12,6 +12,95 @@ using BlendTypeEnum = VRageRender.MyBillboard.BlendTypeEnum;
 
 namespace GVK.Navigation
 {
+    internal static class GvkHudBroker
+    {
+        private sealed class Subscriber
+        {
+            internal Action Callback;
+            internal bool Delivered;
+        }
+
+        private static readonly List<Subscriber> subscribers = new List<Subscriber>();
+        private static HudAPIv2 api;
+        private static bool ready;
+        private static bool constructing;
+
+        internal static HudAPIv2 Acquire(Action onReady)
+        {
+            if (onReady == null)
+                throw new ArgumentNullException("onReady");
+
+            Subscriber subscriber = subscribers.Find(s => s.Callback == onReady);
+            if (subscriber == null)
+            {
+                subscriber = new Subscriber { Callback = onReady };
+                subscribers.Add(subscriber);
+            }
+
+            if (api == null && !constructing)
+            {
+                constructing = true;
+                try
+                {
+                    api = new HudAPIv2(OnRegistered);
+                }
+                finally
+                {
+                    constructing = false;
+                }
+            }
+
+            if (ready && !constructing)
+                Dispatch();
+            return api;
+        }
+
+        private static void OnRegistered()
+        {
+            ready = true;
+            // A provider can notify synchronously from the wrapper constructor.
+            if (!constructing)
+                Dispatch();
+        }
+
+        private static void Dispatch()
+        {
+            var snapshot = subscribers.ToArray();
+            foreach (var subscriber in snapshot)
+            {
+                if (!subscribers.Contains(subscriber) || subscriber.Delivered)
+                    continue;
+                subscriber.Delivered = true;
+                try
+                {
+                    subscriber.Callback();
+                }
+                catch (Exception ex)
+                {
+                    MyLog.Default.WriteLineAndConsole("[GvkHudBroker] HUD registration callback failed: " + ex);
+                }
+            }
+        }
+
+        internal static void Release(Action onReady)
+        {
+            if (onReady == null)
+                return;
+            Subscriber subscriber = subscribers.Find(s => s.Callback == onReady);
+            if (subscriber == null)
+                return;
+            subscribers.Remove(subscriber);
+            if (subscribers.Count != 0)
+                return;
+
+            HudAPIv2 closing = api;
+            api = null;
+            ready = false;
+            if (closing != null)
+                closing.Close();
+        }
+    }
+
     /// <summary>
     /// KOTH zone state from the GVK KOTH Torch plugin (GV-Server-Mods/GVK-KOTH-Plugin, docs/CLIENT_PROTOCOL.md).
     /// Filled by <see cref="GVK_KothClient"/>; the /gvk navigation HUD reads it for its KOTH markers.
@@ -28,6 +117,7 @@ namespace GVK.Navigation
             public int Participants;    // Counted at the last server check (open zones)
             public DateTime StartUtc;   // When it opens (next zone)
             public long EntityId;       // NPC zones: the grid the zone follows (0 for fixed zones)
+            public string FactionTags;  // null = legacy server; empty = no eligible factions
         }
 
         /// <summary>
@@ -60,6 +150,8 @@ namespace GVK.Navigation
     {
         private const ushort CHANNEL = 47410;
         private const int PANEL_UPDATE_TICKS = 10;
+        private const int FACTION_PAGE_TICKS = 300;
+        private const int FACTION_PAGE_CHARS = 24;
         private const double STALE_SECONDS = 30.0;      // No message for this long: the plugin stopped, clear the zones
         private const double BOUNDARY_SHOW_MARGIN = 1000.0;
         private const double FIREWORKS_RANGE = 5000.0;
@@ -92,6 +184,12 @@ namespace GVK.Navigation
         private int lastPercent = -1;
         private int lastParticipants = -1;
         private string lastName;
+        private long lastZoneEntityId;
+        private Vector3D lastZonePosition;
+        private string lastFactionTags;
+        private readonly List<string> factionPages = new List<string>();
+        private int factionPageStartTick;
+        private int lastFactionPage = -1;
         private int tick;
         private bool registered;
 
@@ -102,7 +200,7 @@ namespace GVK.Navigation
 
             MyAPIGateway.Multiplayer.RegisterSecureMessageHandler(CHANNEL, OnMessage);
             registered = true;
-            hudApi = new HudAPIv2(OnHudApiRegistered);
+            hudApi = GvkHudBroker.Acquire(OnHudApiRegistered);
         }
 
         protected override void UnloadData()
@@ -113,11 +211,20 @@ namespace GVK.Navigation
 
             if (hudApi != null)
             {
-                panelBg?.DeleteMessage();
-                panelAccent?.DeleteMessage();
-                panelMsg?.DeleteMessage();
-                hudApi.Close();
-                hudApi = null;
+                try
+                {
+                    try { panelBg?.DeleteMessage(); }
+                    finally
+                    {
+                        try { panelAccent?.DeleteMessage(); }
+                        finally { panelMsg?.DeleteMessage(); }
+                    }
+                }
+                finally
+                {
+                    try { GvkHudBroker.Release(OnHudApiRegistered); }
+                    finally { hudApi = null; }
+                }
             }
 
             KothClientData.Zones.Clear();
@@ -132,7 +239,7 @@ namespace GVK.Navigation
                 Origin: origin,
                 BillBoardColor: new Color(10, 16, 24, 220),
                 Width: 0.36f,
-                Height: 0.075f,
+                Height: 0.105f,
                 HideHud: true,
                 Shadowing: true,
                 Blend: BlendTypeEnum.PostPP);
@@ -144,7 +251,7 @@ namespace GVK.Navigation
                 BillBoardColor: new Color(255, 128, 31),
                 Offset: new Vector2D(-0.18 + 0.004, 0.0),
                 Width: 0.005f,
-                Height: 0.069f,
+                Height: 0.099f,
                 HideHud: true,
                 Shadowing: false,
                 Blend: BlendTypeEnum.PostPP);
@@ -152,7 +259,7 @@ namespace GVK.Navigation
 
             panelMsg = new HudAPIv2.HUDMessage(
                 Message: panelText,
-                Origin: new Vector2D(origin.X - 0.18 + 0.014, origin.Y + 0.028),
+                Origin: new Vector2D(origin.X - 0.18 + 0.014, origin.Y + 0.043),
                 Scale: 0.62,
                 HideHud: true,
                 Shadowing: true,
@@ -185,7 +292,8 @@ namespace GVK.Navigation
                 return;
 
             var c = CultureInfo.InvariantCulture;
-            KothClientData.Zones.Clear();
+            var zones = new List<KothClientData.Zone>();
+            var completions = new List<Vector3D>();
 
             for (int i = 1; i < lines.Length; i++)
             {
@@ -208,22 +316,28 @@ namespace GVK.Navigation
                         zone.Participants = int.Parse(f[7], c);
                         if (f.Length >= 9)
                             zone.EntityId = long.Parse(f[8], c);
+                        if (f.Length >= 10)
+                            zone.FactionTags = f[9];
                     }
                     else
                     {
                         zone.StartUtc = new DateTime(long.Parse(f[6], c), DateTimeKind.Utc);
                     }
-                    KothClientData.Zones.Add(zone);
+                    zones.Add(zone);
                 }
                 else if (f[0] == "C" && f.Length >= 5)
                 {
                     var position = new Vector3D(double.Parse(f[2], c), double.Parse(f[3], c), double.Parse(f[4], c));
-                    QueueFireworks(position);
+                    completions.Add(position);
                 }
             }
 
+            KothClientData.Zones.Clear();
+            KothClientData.Zones.AddRange(zones);
             lastMessageUtc = DateTime.UtcNow;
             KothClientData.Changed = true;
+            foreach (var position in completions)
+                QueueFireworks(position);
         }
 
         // --- Panel and fireworks -------------------------------------------------------------------------------
@@ -276,22 +390,40 @@ namespace GVK.Navigation
             if (!show)
             {
                 lastPercent = -1; // Rebuild the text next time the panel shows
+                lastFactionPage = -1;
                 return;
             }
 
             var z = KothClientData.Zones[inside];
             int percent = (int)Math.Round(MathHelper.Clamp(z.Fraction, 0.0, 1.0) * 100.0);
 
-            // Rebuild the text only when something shown has changed
-            if (percent == lastPercent && z.Participants == lastParticipants && string.Equals(z.Name, lastName))
+            // Grid IDs remain stable while NPC zones move; fixed zones are identified by name and position.
+            bool sameZone = z.EntityId == lastZoneEntityId &&
+                (z.EntityId != 0 || (string.Equals(z.Name, lastName) && z.Position.Equals(lastZonePosition)));
+            if (!sameZone || !string.Equals(z.FactionTags, lastFactionTags) || !string.Equals(z.Name, lastName)
+                || lastFactionPage < 0)
+            {
+                BuildFactionPages(z.FactionTags);
+                factionPageStartTick = tick;
+            }
+            int factionPage = factionPages.Count == 0 ? 0 :
+                (int)((uint)(tick - factionPageStartTick) / FACTION_PAGE_TICKS % (uint)factionPages.Count);
+
+            // Rebuild when displayed data or the rotating faction page changes.
+            if (sameZone && percent == lastPercent && z.Participants == lastParticipants && string.Equals(z.Name, lastName)
+                && string.Equals(z.FactionTags, lastFactionTags) && factionPage == lastFactionPage)
                 return;
             lastPercent = percent;
             lastParticipants = z.Participants;
             lastName = z.Name;
+            lastZoneEntityId = z.EntityId;
+            lastZonePosition = z.Position;
+            lastFactionTags = z.FactionTags;
+            lastFactionPage = factionPage;
 
             int filled = percent / 5;
             panelText.Clear();
-            panelText.Append("<color=255,128,31>KOTH ").Append(z.Name).Append("<color=180,195,210>  |  <color=255,255,255>")
+            panelText.Append("<color=255,128,31>KOTH ").Append(FitPanelText(z.Name, 20)).Append("<color=180,195,210>  |  <color=255,255,255>")
                      .Append(percent).Append("%\n<color=255,200,60>");
             for (int i = 0; i < 20; i++)
             {
@@ -299,6 +431,69 @@ namespace GVK.Navigation
                 panelText.Append('|');
             }
             panelText.Append("<color=180,195,210>  counted: <color=255,255,255>").Append(z.Participants);
+            panelText.Append("\n<color=180,195,210>factions");
+            if (factionPages.Count > 1)
+                panelText.Append(" ").Append(factionPage + 1).Append("/").Append(factionPages.Count);
+            panelText.Append(": <color=255,255,255>")
+                     .Append(z.FactionTags == null ? "unavailable" :
+                             factionPages.Count == 0 ? "none" : factionPages[factionPage]);
+
+            // Measure the actual font, including unusually wide characters, before fitting the panel.
+            panelMsg.Scale = 0.62;
+            panelMsg.Flush();
+            var size = panelMsg.GetTextLength();
+            double width = Math.Abs(size.X);
+            double height = Math.Abs(size.Y);
+            double fit = 1.0;
+            if (width > 0.33) fit = Math.Min(fit, 0.33 / width);
+            if (height > 0.09) fit = Math.Min(fit, 0.09 / height);
+            if (fit < 1.0) panelMsg.Scale = 0.62 * fit;
+        }
+
+        // Keep all faction text in deterministic, rotating pages, preferring whitespace boundaries.
+        private void BuildFactionPages(string tags)
+        {
+            factionPages.Clear();
+            if (string.IsNullOrEmpty(tags))
+                return;
+
+            var safe = new StringBuilder(tags.Length);
+            foreach (char ch in tags)
+                safe.Append(ch == '<' || ch == '>' || char.IsControl(ch) ? ' ' : ch);
+            string text = safe.ToString();
+            int start = 0;
+            while (start < text.Length)
+            {
+                int length = Math.Min(FACTION_PAGE_CHARS, text.Length - start);
+                if (start + length < text.Length)
+                {
+                    int boundary = text.LastIndexOf(' ', start + length - 1, length);
+                    if (boundary > start)
+                        length = boundary - start + 1;
+                }
+                factionPages.Add(text.Substring(start, length));
+                start += length;
+            }
+        }
+
+        // HUD text supports markup. Restrict untrusted server text to one short, safe line.
+        private static string FitPanelText(string value, int maxLength)
+        {
+            if (string.IsNullOrEmpty(value))
+                return string.Empty;
+
+            var result = new StringBuilder(Math.Min(value.Length, maxLength));
+            for (int i = 0; i < value.Length && result.Length < maxLength; i++)
+            {
+                char ch = value[i];
+                result.Append(ch == '<' || ch == '>' || char.IsControl(ch) ? ' ' : ch);
+            }
+            if (value.Length > maxLength && maxLength >= 3)
+            {
+                result.Length = maxLength - 3;
+                result.Append("...");
+            }
+            return result.ToString();
         }
 
         private void QueueFireworks(Vector3D center)

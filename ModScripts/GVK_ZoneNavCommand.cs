@@ -683,7 +683,7 @@ namespace GVK.Navigation
             {
                 LoadConfig();
                 MyAPIGateway.Utilities.MessageEntered += OnMessageEntered;
-                hudApi = new HudAPIv2(OnHudApiRegistered);
+                hudApi = GvkHudBroker.Acquire(OnHudApiRegistered);
             }
         }
 
@@ -691,52 +691,66 @@ namespace GVK.Navigation
         {
             if (!MyAPIGateway.Utilities.IsDedicated)
             {
-                SaveConfig();
-                MyAPIGateway.Utilities.MessageEntered -= OnMessageEntered;
-
-                if (hudApi != null)
+                try
                 {
-                    compassBg?.DeleteMessage();
-                    compassLeftAccent?.DeleteMessage();
-                    compassRightAccent?.DeleteMessage();
-                    compassCenterPointer?.DeleteMessage();
-                    compassCenterBottomPip?.DeleteMessage();
-                    ClearTapePool();
-                    ClearSpritePool();
-                    _compassVisibleWps.Clear();
+                    SaveConfig();
+                    MyAPIGateway.Utilities.MessageEntered -= OnMessageEntered;
 
-                    zoneMsg?.DeleteMessage();
-                    zoneDistMsg?.DeleteMessage();
-                    zoneNextMsg?.DeleteMessage();
-                    zoneBg?.DeleteMessage();
-                    zoneAccent?.DeleteMessage();
+                    if (hudApi != null)
+                    {
+                        compassBg?.DeleteMessage();
+                        compassLeftAccent?.DeleteMessage();
+                        compassRightAccent?.DeleteMessage();
+                        compassCenterPointer?.DeleteMessage();
+                        compassCenterBottomPip?.DeleteMessage();
+                        ClearTapePool();
+                        ClearSpritePool();
+                        _compassVisibleWps.Clear();
 
-                    minimapBg?.DeleteMessage();
-                    minimapAccent?.DeleteMessage();
-                    minimapTerrain?.DeleteMessage();
-                    minimapPlayerDot?.DeleteMessage();
-                    minimapLabel?.DeleteMessage();
-                    radarGrid?.DeleteMessage();
-                    radarFovLeft?.DeleteMessage();
-                    radarFovRight?.DeleteMessage();
-                    radarLowerZoneLine?.DeleteMessage();
-                    radarHigherZoneLine?.DeleteMessage();
-                    ClearMinimapPool();
+                        zoneMsg?.DeleteMessage();
+                        zoneDistMsg?.DeleteMessage();
+                        zoneNextMsg?.DeleteMessage();
+                        zoneBg?.DeleteMessage();
+                        zoneAccent?.DeleteMessage();
 
-                    mapDimmer?.DeleteMessage();
-                    mapFrame?.DeleteMessage();
-                    mapTerrain?.DeleteMessage();
-                    mapPlayerDot?.DeleteMessage();
-                    mapHeaderBg?.DeleteMessage();
-                    mapHeaderAccent?.DeleteMessage();
-                    mapHeaderMsg?.DeleteMessage();
-                    mapHeaderSubMsg?.DeleteMessage();
-                    ClearFullMapPool();
-                    _mapLabelMeasure?.DeleteMessage();
-                    _cachedMapClusters.Clear();
+                        minimapBg?.DeleteMessage();
+                        minimapAccent?.DeleteMessage();
+                        minimapTerrain?.DeleteMessage();
+                        minimapPlayerDot?.DeleteMessage();
+                        minimapLabel?.DeleteMessage();
+                        radarGrid?.DeleteMessage();
+                        radarFovLeft?.DeleteMessage();
+                        radarFovRight?.DeleteMessage();
+                        radarLowerZoneLine?.DeleteMessage();
+                        radarHigherZoneLine?.DeleteMessage();
+                        ClearMinimapPool();
 
-                    hudApi.Close();
-                    hudApi = null;
+                        mapDimmer?.DeleteMessage();
+                        mapFrame?.DeleteMessage();
+                        mapTerrain?.DeleteMessage();
+                        mapPlayerDot?.DeleteMessage();
+                        mapHeaderBg?.DeleteMessage();
+                        mapHeaderAccent?.DeleteMessage();
+                        mapHeaderMsg?.DeleteMessage();
+                        mapHeaderSubMsg?.DeleteMessage();
+                        ClearFullMapPool();
+                        _mapLabelMeasure?.DeleteMessage();
+                        _cachedMapClusters.Clear();
+                    }
+                }
+                finally
+                {
+                    if (hudApi != null)
+                    {
+                        try
+                        {
+                            GvkHudBroker.Release(OnHudApiRegistered);
+                        }
+                        finally
+                        {
+                            hudApi = null;
+                        }
+                    }
                 }
             }
         }
