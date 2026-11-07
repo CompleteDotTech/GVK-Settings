@@ -1,0 +1,16 @@
+{
+  "worktree": {
+    "setup": [
+      "dotnet restore GVK_Settings.csproj"
+    ],
+    "teardown": "echo \"Setup starts no persistent services; Paseo handles worktree removal.\""
+  },
+  "scripts": {
+    "diff-check": {
+      "command": "git diff --check"
+    },
+    "build": {
+      "command": "dotnet build GVK_Settings.csproj --no-restore"
+    }
+  }
+}
